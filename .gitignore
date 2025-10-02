@@ -1,0 +1,26 @@
+# ---- Android / Gradle / Studio
+android/.gradle/
+android/.idea/
+android/local.properties
+android/**/build/
+android/**/captures/
+android/**/generated/
+android/**/intermediates/
+
+# Keep these (do NOT ignore):
+# android/gradlew
+# android/gradlew.bat
+# android/gradle/wrapper/**
+
+# ---- Backend (FastAPI / Python)
+backend/.venv/
+backend/__pycache__/
+backend/.mypy_cache/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/.env
+backend/.env.*
+
+# ---- OS/editor junk
+.DS_Store
+Thumbs.db
