@@ -2,6 +2,7 @@ package com.pricecompare.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -10,13 +11,12 @@ import androidx.compose.ui.window.Dialog
 import com.pricecompare.di.AppModule
 import com.pricecompare.data.remote.Product
 import com.pricecompare.util.euro
-import kotlinx.coroutines.launch
 
 @Composable
-fun CompareBottomSheet(product: Product, onDismiss: () -> Unit) {
+fun CompareDialog(product: Product, onDismiss: () -> Unit) {
     Dialog(onDismissRequest = onDismiss) {
-        Surface(tonalElevation = 3.dp) {
-            CompareContent(product, onDismiss)
+        Surface(tonalElevation = 4.dp, shape = MaterialTheme.shapes.extraLarge) {
+            CompareContent(product, onClose = onDismiss)
         }
     }
 }
@@ -24,81 +24,91 @@ fun CompareBottomSheet(product: Product, onDismiss: () -> Unit) {
 @Composable
 fun CompareContent(product: Product, onClose: () -> Unit) {
     val repo = AppModule.repo
-    val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
-
-    // UI-only row (so we don't depend on the backend PriceOut constructor)
-    data class RowVM(
-        val store: String,
-        val raw: String,
-        val promo: Boolean,
-        val price: Double,
-        val unit: Double?
-    )
-
     var rows by remember { mutableStateOf<List<RowVM>>(emptyList()) }
 
     LaunchedEffect(product.id) {
-        loading = true; error = null
-        scope.launch {
-            try {
-                val offers = repo.compare(product.id).offers
-                rows = offers.map { RowVM(it.store, it.raw_name, it.promo, it.price_eur, it.unit_price) }
-            } catch (e: Exception) {
-                error = e.message
-            } finally {
-                loading = false
-            }
+        loading = true
+        error = null
+        try {
+            val offers = repo.compare(product.id).offers
+
+            // Map first ➜ then sort RowVMs
+            rows = offers
+                .map {
+                    RowVM(
+                        store = it.store,
+                        name = it.raw_name,
+                        price = it.price_eur,
+                        unitPrice = it.unit_price,
+                        collectedAt = it.collected_at ?: ""
+                    )
+                }
+                .sortedWith(
+                    compareBy<RowVM> { it.unitPrice ?: Double.POSITIVE_INFINITY }
+                        .thenBy { it.price ?: Double.POSITIVE_INFINITY }
+                )
+        } catch (e: Exception) {
+            error = e.message ?: "Gabim i panjohur"
+        } finally {
+            loading = false
         }
     }
 
-    // If backend list is empty (but no error), use a demo list so the sheet isn’t blank
-    val shown = if (!loading && error == null && rows.isEmpty()) demoRows(product) else rows
-    val sorted = shown.sortedBy { it.price }
-
-    Column(Modifier.padding(16.dp)) {
-        Text("Krahaso: ${sqName(product.canonical_name)}", style = MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(8.dp))
-        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        error?.let { Text("Gabim: $it", color = MaterialTheme.colorScheme.error) }
-
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
-            items(sorted.size) { i ->
-                val o = sorted[i]
-                ListItem(
-                    headlineContent = { Text(o.store) },
-                    supportingContent = { Text(o.raw + if (o.promo) "  • OFERTË" else "") },
-                    trailingContent = {
-                        Column {
-                            Text(euro(o.price), style = MaterialTheme.typography.titleMedium)
-                            Text("për njësi: ${euro(o.unit)}", style = MaterialTheme.typography.bodySmall)
+    Column(Modifier.padding(16.dp).widthIn(max = 520.dp)) {
+        Text(product.canonical_name, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(6.dp))
+        when {
+            loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
+            error != null -> Text("Gabim: $error", color = MaterialTheme.colorScheme.error)
+            rows.isEmpty() -> Text("S’ka çmime për këtë produkt tani.")
+            else -> {
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.heightIn(max = 420.dp)
+                ) {
+                    items(rows) { r ->
+                        ElevatedCard {
+                            Row(
+                                Modifier.padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(r.store, style = MaterialTheme.typography.titleMedium)
+                                    if (r.name.isNotBlank()) {
+                                        Text(r.name, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    Text(
+                                        "Përditësuar: ${r.collectedAt}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                Column(
+                                    horizontalAlignment = androidx.compose.ui.Alignment.End,
+                                    modifier = Modifier.widthIn(min = 120.dp)
+                                ) {
+                                    Text(euro(r.price), style = MaterialTheme.typography.titleMedium)
+                                    Text("(${euro(r.unitPrice)}/njësi)", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                         }
                     }
-                )
-                Divider()
+                }
             }
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             TextButton(onClick = onClose) { Text("Mbyll") }
         }
     }
 }
 
-/** Demo list for the sheet (UI-only) */
-private fun demoRows(p: Product): List<CompareContent.RowVM> {
-    fun row(store: String, price: Double, unit: Double? = price) =
-        CompareContent.RowVM(store, p.canonical_name, false, price, unit)
-
-    return when (p.canonical_name) {
-        "Milk 1L 2.8%" -> listOf(row("Viva Fresh", 0.89), row("SPAR (Wolt)", 0.95), row("Maxi", 0.99))
-        "Milk 1L 3.5%" -> listOf(row("SPAR (Wolt)", 0.95), row("Interex", 0.98), row("Viva Fresh", 0.99))
-        "Feta / White Cheese 400g" -> listOf(row("Maxi", 2.49, 6.22), row("Viva Fresh", 2.59, 6.47))
-        // Butter fixed per your check at Viva (≈2.15€)
-        "Butter 250g" -> listOf(row("Viva Fresh", 2.15, 8.60), row("Maxi", 2.49, 9.96))
-        "Yogurt 1kg tub" -> listOf(row("Interex", 1.29), row("Viva Fresh", 1.39))
-        "Potatoes per kg" -> listOf(row("Viva Fresh", 0.59), row("Interex", 0.65))
-        else -> emptyList()
-    }
-}
+private data class RowVM(
+    val store: String,
+    val name: String,
+    val price: Double?,
+    val unitPrice: Double?,
+    val collectedAt: String
+)

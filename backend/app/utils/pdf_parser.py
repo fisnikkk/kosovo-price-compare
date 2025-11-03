@@ -1,16 +1,24 @@
 from __future__ import annotations
-import re
+import os, re
+from dotenv import load_dotenv
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
+from .image_ocr import ocr_image_to_text
+from .taxonomy import detect_brand, detect_category  # <-- NEW
 
-import pdfplumber
-from pdf2image import convert_from_path
-import pytesseract
+load_dotenv()
 
-PRICE_RE = re.compile(r"(\d+[.,]\d{1,2})\s*€?")
+# match €1,89 / 1.89€ / 1 89 € / 9€ / 9 eur / euro 1 29, etc.
+PRICE_RE = re.compile(
+    r"(?:(?:€|eur|euro)\s*)?"                # optional currency before
+    r"(\d{1,3}(?:[.,\s]\d{2})?|\d{1,3})"     # 1.89 / 1 89 / 9
+    r"\s*(?:€|eur|euro)?",                   # optional currency after
+    re.I
+)
 DATE_RE  = re.compile(r"(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})")
 
 def _parse_date(s: str) -> Optional[datetime]:
+    """Parses a date string with various common formats."""
     for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%y", "%d/%m/%y", "%d-%m-%y"):
         try:
             return datetime.strptime(s, fmt)
@@ -19,18 +27,18 @@ def _parse_date(s: str) -> Optional[datetime]:
     return None
 
 def _dedupe(items: List[Dict]) -> List[Dict]:
-    uniq = {}
+    """Removes duplicate items based on name and price."""
+    seen = {}
     for it in items:
         key = (it["raw_name"], round(it["price_eur"], 2))
-        uniq[key] = it
-    return list(uniq.values())
+        seen[key] = it
+    return list(seen.values())
 
-def _extract_items_from_text(text: str) -> Tuple[List[Dict], Tuple[Optional[datetime], Optional[datetime]]]:
+def parse_text_for_items(text: str) -> Tuple[List[Dict], Tuple[Optional[datetime], Optional[datetime]]]:
+    """Parses raw text to extract product items and validity dates (now with brand+category)."""
     items: List[Dict] = []
-    vfrom: Optional[datetime] = None
-    vto: Optional[datetime] = None
+    vfrom = vto = None
 
-    # try to capture validity range anywhere in the text
     dates = DATE_RE.findall(text)
     if len(dates) >= 2:
         d1 = _parse_date(dates[0]); d2 = _parse_date(dates[1])
@@ -41,53 +49,46 @@ def _extract_items_from_text(text: str) -> Tuple[List[Dict], Tuple[Optional[date
         line_c = " ".join(line.split())
         if not line_c:
             continue
-        m = PRICE_RE.search(line_c.replace(",", "."))
+
+        m = PRICE_RE.search(line_c)
         if not m:
             continue
+
         try:
-            price = float(m.group(1).replace(",", "."))
-        except:
+            # turn "1 29" or "1,29" into "1.29"
+            price_str = re.sub(r"[,\s]", ".", m.group(1)).strip(".")
+            price = float(price_str)
+        except Exception:
             continue
+
+        # remove the matched price (with currency) from the name
         name = PRICE_RE.sub("", line_c).strip(" :-•–—")
         if len(name) < 3:
             continue
-        items.append({"raw_name": name, "price_eur": price})
+
+        items.append({
+            "raw_name": name,
+            "price_eur": price,
+            "brand": detect_brand(name),        # <-- NEW
+            "category": detect_category(name),  # <-- NEW
+        })
 
     return _dedupe(items), (vfrom, vto)
 
-def _text_from_pdf_plumber(path: str) -> str:
-    out = []
-    with pdfplumber.open(path) as pdf:
-        for p in pdf.pages:
-            out.append(p.extract_text() or "")
-    return "\n".join(out)
-
-def _text_from_pdf_ocr(path: str) -> str:
-    # Poppler renders -> images; Tesseract OCR
-    pages = convert_from_path(path, dpi=200)
-    chunks = []
-    for img in pages:
-        # Try Albanian + English; fall back to eng
-        try:
-            txt = pytesseract.image_to_string(img, lang="sqi+eng")
-        except:
-            txt = pytesseract.image_to_string(img, lang="eng")
-        chunks.append(txt or "")
-    return "\n".join(chunks)
-
-def parse_generic_flyer(path: str) -> Tuple[List[Dict], Tuple[Optional[datetime], Optional[datetime]]]:
+def parse_generic_flyer(pdf_path: str) -> Tuple[List[Dict], Tuple[Optional[datetime], Optional[datetime]]]:
     """
-    Try text extraction first; if empty/too few items, OCR fallback.
+    Parses a PDF flyer by converting it to images and running OCR.
+    Validates Poppler path at runtime.
     """
-    # 1) text path
-    text = _text_from_pdf_plumber(path)
-    items, validity = _extract_items_from_text(text)
+    POPPLER_PATH = (os.getenv("POPPLER_PATH") or "").strip().strip('"')
+    if not POPPLER_PATH or not os.path.exists(os.path.join(POPPLER_PATH, "pdfinfo.exe")):
+        raise RuntimeError(
+            f"POPPLER_PATH invalid: {POPPLER_PATH!r}. Expected pdfinfo.exe inside this folder."
+        )
 
-    # 2) OCR fallback if needed
-    if len(items) < 5:
-        ocr_text = _text_from_pdf_ocr(path)
-        items2, validity2 = _extract_items_from_text(ocr_text)
-        if len(items2) > len(items):
-            items, validity = items2, validity2
+    # Import here so missing Poppler won't crash the whole app at import-time
+    from pdf2image import convert_from_path
 
-    return items, validity
+    pages = convert_from_path(pdf_path, dpi=200, poppler_path=POPPLER_PATH)
+    text = "\n".join(ocr_image_to_text(img) for img in pages)
+    return parse_text_for_items(text)

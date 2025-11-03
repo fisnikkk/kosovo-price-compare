@@ -2,6 +2,7 @@ from __future__ import annotations
 import httpx, tempfile, os, re
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
+from datetime import datetime
 
 from ..models import Store, StoreItem, Price
 from ..utils.pdf_parser import parse_generic_flyer
@@ -64,12 +65,12 @@ async def crawl_spar_flyer(db: Session, city: str = "Prishtina"):
 
                 item = db.query(StoreItem).filter_by(store_id=store.id, raw_name=name).one_or_none()
                 if not item:
-                    item = StoreItem(store_id=store.id, external_id=name[:64], raw_name=name, url=pdf_url)
+                    item = StoreItem(store_id=store.id, external_id=name[:64], raw_name=name, url=pdf_url, category=it.get("category"))
                     db.add(item); db.commit(); db.refresh(item)
 
                 up = unit_price_eur(price, size_ml_g, unit_hint)
                 db.add(Price(store_item_id=item.id, price_eur=price, unit_price=up,
-                             promo_flag=True, promo_valid_from=vfrom, promo_valid_to=vto))
+                             promo_flag=True, promo_valid_from=vfrom, promo_valid_to=vto, collected_at=datetime.utcnow()))
                 db.commit()
                 processed_total += 1
 

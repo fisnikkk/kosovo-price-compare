@@ -1,33 +1,76 @@
-from rapidfuzz import fuzz, process
 from sqlalchemy.orm import Session
 from ..models import Product, StoreItem, Mapping
 
-def score_item_against_product(item_name: str, prod: Product) -> float:
-    # Base fuzzy on names
-    s1 = fuzz.token_set_ratio(item_name, prod.canonical_name) / 100.0
-    # brand boost
-    brand_boost = 0.15 if (prod.brand and prod.brand.lower() in item_name.lower()) else 0.0
-    # category weak boost (assumes category word present)
-    cat_boost = 0.10 if prod.category.lower() in item_name.lower() else 0.0
-    # size proximity bonus/penalty
-    size_bonus = 0.0
-    from ..utils.normalize import parse_size_and_fat
-    item_size, _, item_fat = parse_size_and_fat(item_name)
-    if prod.size_ml_g and item_size:
-        diff = abs(prod.size_ml_g - item_size) / max(prod.size_ml_g, 1)
-        size_bonus = 0.15 if diff <= 0.1 else (0.05 if diff <= 0.2 else -0.1)
-    fat_bonus = 0.0
-    if prod.fat_pct and item_fat:
-        fdiff = abs(prod.fat_pct - item_fat)
-        fat_bonus = 0.1 if fdiff <= 0.3 else (0.05 if fdiff <= 0.7 else -0.1)
+# Defensive matching gates to improve accuracy
+AL_TOKENS = {
+    "milk": {"qumesht", "qumësht", "qumeshti", "qumështi", "milk", "mleko", "latte"},
+    "yogurt": {"jogurt", "jogurti", "kos", "kefir", "ajran", "ayran", "yogurt"},
+    "butter": {"gjalp", "gjalpë", "butter", "margarine"},
+    "cheese": {"djath", "djathë", "feta", "white cheese", "sir", "kackavall", "kačkavalj"},
+}
 
-    return max(0.0, min(1.0, s1 + brand_boost + cat_boost + size_bonus + fat_bonus))
+NEGATIVE_BY_CATEGORY = {
+    "milk": AL_TOKENS["yogurt"] | {"kefir", "ajke", "cream"},
+    "yogurt": AL_TOKENS["milk"],
+    "butter": {"margarine"},
+}
+
+def normalize(s: str) -> str:
+    return s.lower()
+
+def has_any(s: str, words: set[str]) -> bool:
+    s = normalize(s)
+    return any(w in s for w in words)
+
+def score_item_against_product(item_name: str, product: Product) -> float:
+    name = normalize(item_name)
+    cat = product.category
+
+    # Hard blocks to avoid milk<->yogurt cross hits
+    if cat in NEGATIVE_BY_CATEGORY and has_any(name, NEGATIVE_BY_CATEGORY[cat]):
+        return 0.0
+
+    # Require at least one positive token for the category
+    if cat in AL_TOKENS and not has_any(name, AL_TOKENS[cat]):
+        return 0.0
+
+    score = 0.0
+
+    # Brand hint
+    if product.brand and product.brand.lower() in name:
+        score += 0.3
+
+    # Size hints (ml/g or “1l”)
+    if product.size_ml_g:
+        ml = product.size_ml_g
+        candidates = {f"{ml}g", f"{ml} gr", f"{ml}gr", f"{ml}ml"}
+        if 1000 <= ml <= 1200:
+            candidates |= {"1l", "1 l"}
+        if has_any(name, candidates):
+            score += 0.35
+
+    # Fat %
+    if product.fat_pct:
+        fat = str(product.fat_pct).replace(".", ",")
+        if f"{fat}%" in name or f"{product.fat_pct}%" in name:
+            score += 0.25
+
+    # Category tokens add a small baseline
+    if cat in AL_TOKENS and has_any(name, AL_TOKENS[cat]):
+        score += 0.2
+
+    return min(score, 1.0)
 
 def ensure_mapping(db: Session, product: Product, item: StoreItem, score: float, threshold: float = 0.7):
     existing = db.query(Mapping).filter_by(product_id=product.id, store_item_id=item.id).one_or_none()
     if score >= threshold:
         if not existing:
             db.add(Mapping(product_id=product.id, store_item_id=item.id, match_score=score))
+        # Optional: Update score if it has changed significantly
+        # elif existing.match_score != score:
+        #     existing.match_score = score
     else:
-        # Do nothing; could log for manual review
+        # If score drops below threshold, you might want to remove an existing mapping
+        # if existing:
+        #     db.delete(existing)
         pass

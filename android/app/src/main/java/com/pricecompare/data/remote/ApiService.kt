@@ -10,30 +10,34 @@ import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
 interface ApiService {
-    @GET("products")
-    suspend fun listProducts(): List<Product>
+    @GET("products/popular")
+    suspend fun popularProducts(): List<Product>
 
-    @GET("products/search")
-    suspend fun searchProducts(@Query("q") q: String): List<Product>
+    @GET("products")
+    suspend fun listProducts(): List<Product> // kept for search screens
 
     @GET("compare")
     suspend fun compare(@Query("product_id") productId: Int): CompareOut
 
-        companion object {
-            fun create(baseUrl: String): ApiService {
-                val log = HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC }
-                val client = OkHttpClient.Builder().addInterceptor(log).build()
-
-                val moshi = Moshi.Builder()
-                    .add(KotlinJsonAdapterFactory())   // <-- important
-                    .build()
-
-                return Retrofit.Builder()
-                    .baseUrl(baseUrl)
-                    .client(client)
-                    .addConverterFactory(MoshiConverterFactory.create(moshi)) // <-- use our Moshi
-                    .build()
-                    .create(ApiService::class.java)
+    companion object {
+        fun build(baseUrl: String): ApiService {
+            val logging = HttpLoggingInterceptor().apply {
+                level = HttpLoggingInterceptor.Level.BASIC
             }
+            val client = OkHttpClient.Builder()
+                .addInterceptor(logging)
+                .build()
+
+            val moshi = Moshi.Builder()
+                .add(KotlinJsonAdapterFactory())
+                .build()
+
+            return Retrofit.Builder()
+                .baseUrl(baseUrl)
+                .client(client)
+                .addConverterFactory(MoshiConverterFactory.create(moshi))
+                .build()
+                .create(ApiService::class.java)
         }
+    }
 }
